@@ -1,0 +1,54 @@
+import os
+import pandas as pd
+import structure_pipeline
+import lava_pipeline
+
+SERVER_PATH = r"C:\LavaServer"
+OUTPUT_DIR = os.path.join(SERVER_PATH, "seeds")
+os.makedirs(OUTPUT_DIR, exist_ok=True)
+
+
+def generate_master_graph(seed: int, radius_blocks: int):
+    print(f"\n{'=' * 50}\n ROZPOCZYNAM ANALIZĘ GRAFU DLA SEEDU {seed}\n{'=' * 50}")
+
+    # 1. Zbieranie struktur
+    struct_df = structure_pipeline.get_structures_df(seed, radius_blocks)
+
+    # 2. Zbieranie lawy z serwera
+    lava_raw_df = lava_pipeline.get_lava_df(seed, radius_blocks // 16, SERVER_PATH)
+
+    lava_df = pd.DataFrame()
+    if not lava_raw_df.empty:
+        lava_df = pd.DataFrame({
+            "node_type": "Lava_Pool",
+            "x": lava_raw_df["x"],
+            "z": lava_raw_df["z"],
+            "dimension": "Overworld",
+            "weight": lava_raw_df["block_count"]
+        })
+
+    # 3. Dodanie punktu startowego
+    spawn_df = pd.DataFrame([{"node_type": "Spawn", "x": 0, "z": 0, "dimension": "Overworld", "weight": 0.0}])
+
+    # 4. Agregacja i formatowanie
+    master_df = pd.concat([spawn_df, struct_df, lava_df], ignore_index=True)
+    master_df.insert(0, 'node_id', master_df.index)
+
+    # Zapis do JEDNEGO pliku
+    final_csv_path = os.path.join(OUTPUT_DIR, f'master_graph_{seed}.csv')
+    with open(final_csv_path, 'w', encoding='utf-8') as f:
+        f.write(f"SEED: {seed}\n")
+        master_df.to_csv(f, index=False)
+
+    print("\n--- GOTOWA TABELA WĘZŁÓW ---")
+    # Zwraca przepięknie sformatowaną tabelkę w oknie konsoli:
+    print(master_df.to_string(index=False))
+    print("-" * 28)
+    print(f"Zapisano czysty plik: {final_csv_path}\n")
+
+
+if __name__ == '__main__':
+    TEST_SEED = 2115
+    RADIUS_IN_BLOCKS = 700  # 20 chunków
+
+    generate_master_graph(TEST_SEED, RADIUS_IN_BLOCKS)
