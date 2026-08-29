@@ -1,0 +1,56 @@
+import pandas as pd
+from cubiomespi import *
+
+MC_VERSION = MCVersion.MC_1_16_5
+
+
+def get_structures_df(seed: int, radius_blocks: int) -> pd.DataFrame:
+    results = []
+
+    # Przelicznik: 1 Region to 512 bloków. Określamy zasięg poszukiwań.
+    region_radius = max(1, radius_blocks // 512 + 1)
+
+    # 1. OVERWORLD
+    gen_ow = Generator(MC_VERSION, seed, Dimension.DIM_OVERWORLD)
+
+    # Szukanie wiosek za pomocą nowej, zoptymalizowanej funkcji
+    villages = find_structure_in_range(
+        gen_ow, Structure.Village,
+        -region_radius, -region_radius,  # Start X, Z
+        region_radius, region_radius  # End X, Z
+    )
+
+    if villages:
+        for x, z in villages:
+            if abs(x) <= radius_blocks and abs(z) <= radius_blocks:
+                results.append({"node_type": "Village", "x": x, "z": z, "dimension": "Overworld", "weight": 1.0})
+
+    # Twierdze (zawsze najbliższe 3 za pomocą dedykowanej funkcji pierścieni)
+    strongholds = get_stronghold_pos(gen_ow, 3)
+    if strongholds:
+        for x, z in strongholds:
+            results.append({"node_type": "Stronghold", "x": x, "z": z, "dimension": "Overworld", "weight": 1.0})
+
+    # 2. NETHER
+    gen_net = Generator(MC_VERSION, seed, Dimension.DIM_NETHER)
+
+    for struct in [Structure.Bastion, Structure.Fortress]:
+        found_structs = find_structure_in_range(
+            gen_net, struct,
+            -region_radius, -region_radius,
+            region_radius, region_radius
+        )
+
+        if found_structs:
+            for x, z in found_structs:
+                if abs(x) <= radius_blocks and abs(z) <= radius_blocks:
+                    results.append(
+                        {"node_type": str(struct).split('.')[-1], "x": x, "z": z, "dimension": "Nether", "weight": 1.0})
+
+    df = pd.DataFrame(results)
+
+    # Zabezpieczenie na wypadek braku struktur w danym promieniu
+    if not df.empty:
+        df = df.drop_duplicates(subset=["node_type", "x", "z"]).reset_index(drop=True)
+
+    return df
