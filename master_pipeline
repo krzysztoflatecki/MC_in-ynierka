@@ -4,6 +4,7 @@ import structure_pipeline
 import lava_pipeline
 import route_optimizer
 import json
+from valid_path import valid_paths
 
 BIOME_CSV_PATH = os.path.join(os.path.dirname(__file__), "biome_cost_lookup.csv")
 SERVER_PATH = r"C:\LavaServer"
@@ -40,6 +41,36 @@ def generate_master_graph(seed: int, radius_blocks: int):
     # 4. Agregacja i formatowanie
     master_df = pd.concat([spawn_df, struct_df, lava_df], ignore_index=True)
     master_df.insert(0, 'node_id', master_df.index)
+
+    # Wewnątrz generate_master_graph po stworzeniu master_df:
+    sampler = structure_pipeline.create_biome_sampler(seed)
+    best_overall = None
+
+    # Wyciągamy unikalne pod-ścieżki dla samego Overworldu (bez Bastionu i Fortecy)
+    ow_scenarios = []
+    for path in valid_paths:
+        ow_only = [node for node in path if node not in ("Bastion", "Fortress")]
+        if ow_only not in ow_scenarios:
+            ow_scenarios.append(ow_only)
+
+    for seq in ow_scenarios:
+        try:
+            res = route_optimizer.optimize_overworld_from_master_df(
+                master_df=master_df,
+                biome_sampler=sampler,
+                cost_csv_path=BIOME_CSV_PATH,
+                sequence_order=seq,
+                step=32
+            )
+            print(f"Scenariusz {seq}: {res['total_time_sec']} s")
+            if best_overall is None or res["total_time_sec"] < best_overall["total_time_sec"]:
+                best_overall = {**res, "scenario": seq}
+        except ValueError as e:
+            # Np. brak wraku lub lawy w zadanym promieniu - pomijamy ten scenariusz
+            print(f"Pominięto {seq}: {e}")
+
+    if best_overall:
+        print(f"\n>>> ZWYCIĘSKI SCENARIUSZ OVERW")
 
     # NAJPIERW zapisujemy gotowy graf (żeby nie stracić danych z serwera Javy)
     final_csv_path = os.path.join(OUTPUT_DIR, f'master_graph_{seed}.csv')
