@@ -1,0 +1,174 @@
+import heapq
+import math
+from typing import Callable, Dict, List, Tuple
+import pandas as pd
+import numpy as np
+
+Coord = Tuple[int, int]
+
+WATER_BIOMES = {
+    "ocean", "deep_ocean",
+    "warm_ocean", "lukewarm_ocean", "cold_ocean",
+    "deep_lukewarm_ocean", "deep_cold_ocean", "deep_frozen_ocean",
+    "river"
+}
+
+# Woda wolniejsza od lądu (~2.20 blok/s przy braku sprint-jumpu)
+WATER_COST_SEC_PER_CHUNK = 7.30
+UNKNOWN_BIOME_FALLBACK = 4.20
+
+
+def load_biome_cost_model(csv_path: str) -> Tuple[Dict[str, float], float]:
+    df = pd.read_csv(csv_path)
+    cost_map = dict(zip(df["biome"], df["risk_cost_robust"]))
+    for wb in WATER_BIOMES:
+        cost_map[wb] = WATER_COST_SEC_PER_CHUNK
+    tau_min = min(cost_map.values())
+    return cost_map, tau_min
+
+
+class RouteOptimizer:
+    def __init__(self, cost_map: Dict[str, float], tau_min: float, biome_sampler: Callable[[int, int], str], step: int = 16):
+        self.cost_map = cost_map
+        self.tau_min = tau_min
+        self.biome_sampler = biome_sampler
+        self.step = step
+        self.biome_cache: Dict[Tuple[int, int], float] = {}
+
+    def _get_node_cost(self, gx: int, gz: int) -> float:
+        if (gx, gz) not in self.biome_cache:
+            world_x = gx * self.step + (self.step // 2)
+            world_z = gz * self.step + (self.step // 2)
+            biome_name = self.biome_sampler(world_x, world_z)
+            self.biome_cache[(gx, gz)] = self.cost_map.get(biome_name, UNKNOWN_BIOME_FALLBACK)
+        return self.biome_cache[(gx, gz)]
+
+    def _to_grid(self, pos: Coord) -> Tuple[int, int]:
+        return (pos[0] // self.step, pos[1] // self.step)
+
+    def _to_world(self, gpos: Tuple[int, int]) -> Coord:
+        return (gpos[0] * self.step + self.step // 2, gpos[1] * self.step + self.step // 2)
+
+    def find_segment_astar(self, start: Coord, goal: Coord) -> Tuple[float, List[Coord]]:
+        s_node = self._to_grid(start)
+        g_node = self._to_grid(goal)
+        sec_per_block_min = self.tau_min / 16.0
+
+        open_set = [(0.0, s_node)]
+        came_from = {}
+        g_score = {s_node: 0.0}
+        neighbors = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
+
+        while open_set:
+            _, current = heapq.heappop(open_set)
+
+            if current == g_node:
+                path = [goal]
+                curr = current
+                while curr in came_from:
+                    path.append(self._to_world(curr))
+                    curr = came_from[curr]
+                path.append(start)
+                path.reverse()
+                return g_score[current], path
+
+            c_cost_per_block = self._get_node_cost(*current) / 16.0
+
+            for dx, dz in neighbors:
+                nxt = (current[0] + dx, current[1] + dz)
+                dist_blocks = math.hypot(dx * self.step, dz * self.step)
+                n_cost_per_block = self._get_node_cost(*nxt) / 16.0
+
+                step_time = dist_blocks * 0.5 * (c_cost_per_block + n_cost_per_block)
+                tentative_g = g_score[current] + step_time
+
+                if tentative_g < g_score.get(nxt, float("inf")):
+                    came_from[nxt] = current
+                    g_score[nxt] = tentative_g
+                    h = math.hypot((g_node[0] - nxt[0]) * self.step, (g_node[1] - nxt[1]) * self.step) * sec_per_block_min
+                    heapq.heappush(open_set, (tentative_g + h, nxt))
+
+        return float("inf"), []
+
+
+def optimize_overworld_from_master_df(
+    master_df: pd.DataFrame,
+    biome_sampler: Callable[[int, int], str],
+    cost_csv_path: str = "biome_cost_lookup.csv",
+    sequence_order: List[str] = ["Spawn", "Village", "Lava_Pool", "Stronghold"],
+    step: int = 16
+) -> Dict:
+    """
+    Pobiera gotowy master_df, filtruje Overworld, buduje warstwy według sequence_order
+    i wyznacza optymalną trasę za pomocą DP + A*.
+    """
+    cost_map, tau_min = load_biome_cost_model(cost_csv_path)
+    optimizer = RouteOptimizer(cost_map, tau_min, biome_sampler, step=step)
+
+    ow_df = master_df[master_df["dimension"] == "Overworld"].copy()
+
+    # Budowa warstw struktur z master_df
+    layers: List[List[Dict]] = []
+    for node_type in sequence_order:
+        subset = ow_df[ow_df["node_type"] == node_type]
+        if subset.empty:
+            raise ValueError(f"Brak węzłów typu '{node_type}' w Overworldzie dla zadanego promienia!")
+        layers.append(subset.to_dict("records"))
+
+    # Programowanie Dynamiczne (Planista)
+    dp = [{i: float("inf") for i in range(len(layer))} for layer in layers]
+    parent = [{} for _ in layers]
+    paths = [{} for _ in layers]
+
+    dp[0][0] = 0.0
+
+    for l in range(1, len(layers)):
+        prev_layer = layers[l - 1]
+        curr_layer = layers[l]
+
+        for u_idx, u_node in enumerate(prev_layer):
+            if dp[l - 1][u_idx] == float("inf"):
+                continue
+
+            u_coord = (int(u_node["x"]), int(u_node["z"]))
+            dists = [math.hypot(int(v["x"]) - u_coord[0], int(v["z"]) - u_coord[1]) for v in curr_layer]
+            min_dist = min(dists)
+            worst_time_to_nearest = (min_dist / 16.0) * WATER_COST_SEC_PER_CHUNK
+
+            for v_idx, v_node in enumerate(curr_layer):
+                best_possible_time = (dists[v_idx] / 16.0) * optimizer.tau_min
+                if best_possible_time > worst_time_to_nearest:
+                    continue
+
+                v_coord = (int(v_node["x"]), int(v_node["z"]))
+                seg_time, seg_path = optimizer.find_segment_astar(u_coord, v_coord)
+                total_time = dp[l - 1][u_idx] + seg_time
+
+                if total_time < dp[l][v_idx]:
+                    dp[l][v_idx] = total_time
+                    parent[l][v_idx] = u_idx
+                    paths[l][v_idx] = seg_path
+
+    last_idx = len(layers) - 1
+    best_end_idx = min(dp[last_idx], key=dp[last_idx].get)
+    best_total_time = dp[last_idx][best_end_idx]
+
+    chosen_nodes = []
+    full_path: List[Coord] = []
+    curr_idx = best_end_idx
+
+    for l in range(last_idx, 0, -1):
+        chosen_nodes.append(layers[l][curr_idx])
+        seg = paths[l][curr_idx]
+        full_path = (seg[:-1] if full_path else seg) + full_path
+        curr_idx = parent[l][curr_idx]
+
+    chosen_nodes.append(layers[0][0])
+    chosen_nodes.reverse()
+
+    return {
+        "total_time_sec": round(best_total_time, 2),
+        "chosen_sequence": chosen_nodes,
+        "waypoints": full_path,
+        "sampled_chunks_count": len(optimizer.biome_cache)
+    }
