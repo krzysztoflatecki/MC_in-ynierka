@@ -2,11 +2,16 @@ import os
 import pandas as pd
 import structure_pipeline
 import lava_pipeline
+import route_optimizer
+import json
 
+BIOME_CSV_PATH = os.path.join(os.path.dirname(__file__), "biome_cost_lookup.csv")
 SERVER_PATH = r"C:\LavaServer"
 OUTPUT_DIR = os.path.join(SERVER_PATH, "seeds")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
+
+import json  # <-- dopisz ten import na samej górze pliku
 
 def generate_master_graph(seed: int, radius_blocks: int):
     print(f"\n{'=' * 50}\n ROZPOCZYNAM ANALIZĘ GRAFU DLA SEEDU {seed}\n{'=' * 50}")
@@ -28,27 +33,54 @@ def generate_master_graph(seed: int, radius_blocks: int):
         })
 
     # 3. Dodanie punktu startowego
-    spawn_df = pd.DataFrame([{"node_type": "Spawn", "x": 0, "z": 0, "dimension": "Overworld", "weight": 0.0}])
+    spawn_x, spawn_z = structure_pipeline.get_world_spawn(seed)
+    spawn_df = pd.DataFrame(
+        [{"node_type": "Spawn", "x": spawn_x, "z": spawn_z, "dimension": "Overworld", "weight": 0.0}])
 
     # 4. Agregacja i formatowanie
     master_df = pd.concat([spawn_df, struct_df, lava_df], ignore_index=True)
     master_df.insert(0, 'node_id', master_df.index)
 
-    # Zapis do JEDNEGO pliku
+    # NAJPIERW zapisujemy gotowy graf (żeby nie stracić danych z serwera Javy)
     final_csv_path = os.path.join(OUTPUT_DIR, f'master_graph_{seed}.csv')
     with open(final_csv_path, 'w', encoding='utf-8') as f:
         f.write(f"SEED: {seed}\n")
         master_df.to_csv(f, index=False)
 
     print("\n--- GOTOWA TABELA WĘZŁÓW ---")
-    # Zwraca przepięknie sformatowaną tabelkę w oknie konsoli:
     print(master_df.to_string(index=False))
     print("-" * 28)
     print(f"Zapisano czysty plik: {final_csv_path}\n")
 
+    # 5. Wyznaczenie optymalnej ścieżki w Overworldzie (Planista + A*)
+    try:
+        sampler = structure_pipeline.create_biome_sampler(seed)
+        route_result = route_optimizer.optimize_overworld_from_master_df(
+            master_df=master_df,
+            biome_sampler=sampler,
+            cost_csv_path=BIOME_CSV_PATH,
+            sequence_order=["Spawn", "Village", "Lava_Pool", "Stronghold"],
+            step=16
+        )
+
+        print("=== OPTYMALNA TRASA OVERWORLD ===")
+        print(f"Szacowany czas przejścia: {route_result['total_time_sec']} s")
+        print(f"Zbadane chunki (lazy cache): {route_result['sampled_chunks_count']}")
+        for node in route_result["chosen_sequence"]:
+            print(f" -> {node['node_type']} (ID: {node['node_id']}) na ({node['x']}, {node['z']})")
+
+        # Zapis wyznaczonej trasy do JSON
+        route_json_path = os.path.join(OUTPUT_DIR, f'route_{seed}.json')
+        with open(route_json_path, 'w', encoding='utf-8') as f:
+            json.dump(route_result, f, indent=2)
+        print(f"Zapisano trasę nawigacyjną: {route_json_path}\n")
+
+    except ValueError as e:
+        print(f"[UWAGA] Nie udało się wyznaczyć pełnej trasy: {e}\n")
+
 
 if __name__ == '__main__':
     TEST_SEED = 2115
-    RADIUS_IN_BLOCKS = 700  # 20 chunków
+    RADIUS_IN_BLOCKS = 1024  # 20 chunków
 
     generate_master_graph(TEST_SEED, RADIUS_IN_BLOCKS)
