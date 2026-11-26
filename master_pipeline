@@ -3,24 +3,24 @@ import pandas as pd
 import structure_pipeline
 import lava_pipeline
 import route_optimizer
-import json
 from valid_path import valid_paths
 
-BIOME_CSV_PATH = os.path.join(os.path.dirname(__file__), "biome_cost_lookup.csv")
-SERVER_PATH = r"C:\LavaServer"
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BIOME_CSV_PATH = os.path.join(BASE_DIR, "biome_cost_lookup.csv")
+NETHER_CSV_PATH = os.path.join(BASE_DIR, "nether_biome_cost_lookup.csv")
+
+SERVER_PATH = r"D:\LavaServer"
 OUTPUT_DIR = os.path.join(SERVER_PATH, "seeds")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 
-import json  # <-- dopisz ten import na samej górze pliku
-
 def generate_master_graph(seed: int, radius_blocks: int):
     print(f"\n{'=' * 50}\n ROZPOCZYNAM ANALIZĘ GRAFU DLA SEEDU {seed}\n{'=' * 50}")
 
-    # 1. Zbieranie struktur
+    # 1. Zbieranie struktur z Cubiomes
     struct_df = structure_pipeline.get_structures_df(seed, radius_blocks)
 
-    # 2. Zbieranie lawy z serwera
+    # 2. Zbieranie lawy z serwera Fabric
     lava_raw_df = lava_pipeline.get_lava_df(seed, radius_blocks // 16, SERVER_PATH)
 
     lava_df = pd.DataFrame()
@@ -33,46 +33,16 @@ def generate_master_graph(seed: int, radius_blocks: int):
             "weight": lava_raw_df["block_count"]
         })
 
-    # 3. Dodanie punktu startowego
+    # 3. Dodanie punktu startowego (prawdziwy spawn z Cubiomes)
     spawn_x, spawn_z = structure_pipeline.get_world_spawn(seed)
-    spawn_df = pd.DataFrame(
-        [{"node_type": "Spawn", "x": spawn_x, "z": spawn_z, "dimension": "Overworld", "weight": 0.0}])
+    spawn_df = pd.DataFrame([
+        {"node_type": "Spawn", "x": spawn_x, "z": spawn_z, "dimension": "Overworld", "weight": 0.0}
+    ])
 
-    # 4. Agregacja i formatowanie
+    # 4. Agregacja i zapis grafu do CSV
     master_df = pd.concat([spawn_df, struct_df, lava_df], ignore_index=True)
     master_df.insert(0, 'node_id', master_df.index)
 
-    # Wewnątrz generate_master_graph po stworzeniu master_df:
-    sampler = structure_pipeline.create_biome_sampler(seed)
-    best_overall = None
-
-    # Wyciągamy unikalne pod-ścieżki dla samego Overworldu (bez Bastionu i Fortecy)
-    ow_scenarios = []
-    for path in valid_paths:
-        ow_only = [node for node in path if node not in ("Bastion", "Fortress")]
-        if ow_only not in ow_scenarios:
-            ow_scenarios.append(ow_only)
-
-    for seq in ow_scenarios:
-        try:
-            res = route_optimizer.optimize_overworld_from_master_df(
-                master_df=master_df,
-                biome_sampler=sampler,
-                cost_csv_path=BIOME_CSV_PATH,
-                sequence_order=seq,
-                step=32
-            )
-            print(f"Scenariusz {seq}: {res['total_time_sec']} s")
-            if best_overall is None or res["total_time_sec"] < best_overall["total_time_sec"]:
-                best_overall = {**res, "scenario": seq}
-        except ValueError as e:
-            # Np. brak wraku lub lawy w zadanym promieniu - pomijamy ten scenariusz
-            print(f"Pominięto {seq}: {e}")
-
-    if best_overall:
-        print(f"\n>>> ZWYCIĘSKI SCENARIUSZ OVERW")
-
-    # NAJPIERW zapisujemy gotowy graf (żeby nie stracić danych z serwera Javy)
     final_csv_path = os.path.join(OUTPUT_DIR, f'master_graph_{seed}.csv')
     with open(final_csv_path, 'w', encoding='utf-8') as f:
         f.write(f"SEED: {seed}\n")
@@ -83,35 +53,40 @@ def generate_master_graph(seed: int, radius_blocks: int):
     print("-" * 28)
     print(f"Zapisano czysty plik: {final_csv_path}\n")
 
-    # 5. Wyznaczenie optymalnej ścieżki w Overworldzie (Planista + A*)
-    try:
-        sampler = structure_pipeline.create_biome_sampler(seed)
-        route_result = route_optimizer.optimize_overworld_from_master_df(
-            master_df=master_df,
-            biome_sampler=sampler,
-            cost_csv_path=BIOME_CSV_PATH,
-            sequence_order=["Spawn", "Village", "Lava_Pool", "Stronghold"],
-            step=16
-        )
+    # 5. PEŁNA OPTYMALIZACJA (OVERWORLD + PORTAL 1:8 + NETHER + PORTAL 8:1)
+    ow_map, ow_min = route_optimizer.load_overworld_cost_model(BIOME_CSV_PATH)
+    net_map, net_min = route_optimizer.load_nether_cost_model(NETHER_CSV_PATH)
 
-        print("=== OPTYMALNA TRASA OVERWORLD ===")
-        print(f"Szacowany czas przejścia: {route_result['total_time_sec']} s")
-        print(f"Zbadane chunki (lazy cache): {route_result['sampled_chunks_count']}")
-        for node in route_result["chosen_sequence"]:
-            print(f" -> {node['node_type']} (ID: {node['node_id']}) na ({node['x']}, {node['z']})")
+    ow_sampler = structure_pipeline.create_biome_sampler(seed, structure_pipeline.Dimension.DIM_OVERWORLD)
+    net_sampler = structure_pipeline.create_biome_sampler(seed, structure_pipeline.Dimension.DIM_NETHER)
 
-        # Zapis wyznaczonej trasy do JSON
-        route_json_path = os.path.join(OUTPUT_DIR, f'route_{seed}.json')
-        with open(route_json_path, 'w', encoding='utf-8') as f:
-            json.dump(route_result, f, indent=2)
-        print(f"Zapisano trasę nawigacyjną: {route_json_path}\n")
+    ow_opt = route_optimizer.RouteOptimizer(ow_map, ow_min, ow_sampler, step=32)
+    net_opt = route_optimizer.RouteOptimizer(net_map, net_min, net_sampler, step=16, fallback_cost=4.50)
 
-    except ValueError as e:
-        print(f"[UWAGA] Nie udało się wyznaczyć pełnej trasy: {e}\n")
+    nodes_by_type = {
+        ntype: group.to_dict("records")
+        for ntype, group in master_df.groupby("node_type")
+    }
+
+    best_run = None
+    for scenario in valid_paths:
+        result = route_optimizer.evaluate_full_scenario(nodes_by_type, scenario, ow_opt, net_opt)
+        if result:
+            print(f"Scenariusz {scenario}: {result['total_time_sec']} s")
+            if best_run is None or result["total_time_sec"] < best_run["total_time_sec"]:
+                best_run = result
+
+    if best_run:
+        print(f"\n>>> NAJLEPSZA TRASA CAŁKOWITA: {best_run['total_time_sec']} s")
+        print(f"Zwycięski scenariusz: {best_run['scenario']}")
+        for n in best_run["chosen_sequence"]:
+            print(f" -> [{n['dimension']}] {n['node_type']} na ({n['x']}, {n['z']})")
+    else:
+        print("\n[UWAGA] Brak kompletnego zestawu struktur dla żadnego ze scenariuszy.")
 
 
 if __name__ == '__main__':
     TEST_SEED = 2115
-    RADIUS_IN_BLOCKS = 1024  # 20 chunków
+    RADIUS_IN_BLOCKS = 1024
 
     generate_master_graph(TEST_SEED, RADIUS_IN_BLOCKS)
