@@ -85,15 +85,21 @@ def get_world_spawn(seed: int) -> tuple[int, int]:
     return int(spawn_pos[0]), int(spawn_pos[1])
 
 
-def create_biome_sampler(seed: int):
-    """Tworzy szybką funkcję próbkującą nazwę biomu w Overworldzie dla zadanego (x, z)."""
-    gen_ow = Generator(MC_VERSION, seed, Dimension.DIM_OVERWORLD)
+def create_biome_sampler(seed: int, dimension=Dimension.DIM_OVERWORLD):
+    """Tworzy funkcję próbkującą nazwę biomu dla zadanego wymiaru (Overworld lub Nether)."""
+    gen = Generator(MC_VERSION, seed, dimension)
+
+    id_to_name = {}
+    for attr in dir(BiomeID):
+        if not attr.startswith("_"):
+            val = getattr(BiomeID, attr)
+            if isinstance(val, int):
+                id_to_name[val] = attr.lower()
 
     def sampler(x: int, z: int) -> str:
-        # Skala 1:1, wysokość Y=64 (powierzchnia)
-        biome_id = get_biome_at(gen_ow, 1, int(x), 64, int(z))
-        # Konwersja np. BiomeID.plains -> "plains" lub "minecraft:plains" -> "plains"
-        name = str(biome_id).split(".")[-1].split(":")[-1].lower()
-        return name
+        biome_id = get_biome_at(gen, int(x), 64, int(z))
+        if isinstance(biome_id, int):
+            return id_to_name.get(biome_id, "unknown")
+        return str(biome_id).split(".")[-1].split(":")[-1].lower()
 
     return sampler
