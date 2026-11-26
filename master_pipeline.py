@@ -3,6 +3,7 @@ import pandas as pd
 import structure_pipeline
 import lava_pipeline
 import route_optimizer
+import map_visualizer
 from valid_path import valid_paths
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -81,12 +82,23 @@ def generate_master_graph(seed: int, radius_blocks: int):
         print(f"Zwycięski scenariusz: {best_run['scenario']}")
         for n in best_run["chosen_sequence"]:
             print(f" -> [{n['dimension']}] {n['node_type']} na ({n['x']}, {n['z']})")
-    else:
-        print("\n[UWAGA] Brak kompletnego zestawu struktur dla żadnego ze scenariuszy.")
+
+        # Generowanie i zapis interaktywnej mapy HTML
+        map_path = os.path.join(OUTPUT_DIR, f"mapa_seed_{seed}.html")
+        fig = map_visualizer.create_interactive_map(
+            seed=seed,
+            master_df=master_df,
+            best_run=best_run,
+            ow_opt=ow_opt,
+            net_opt=net_opt,
+            output_html=map_path,
+            show_biome_heatmap=True
+        )
+        fig.show()
 
 
 if __name__ == '__main__':
     TEST_SEED = 2115
-    RADIUS_IN_BLOCKS = 1024
+    RADIUS_IN_BLOCKS = 850
 
     generate_master_graph(TEST_SEED, RADIUS_IN_BLOCKS)
